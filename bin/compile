@@ -155,7 +155,7 @@ rm "$CACHE_DIR"/"$BUNDLENAME"
 
 echo "Installing server-side dependencies" | indent
 
-server_npm_install "$METEOR_BUILD_DIR"/app/programs/server
+server_npm_install "$METEOR_BUILD_DIR"/app
 
 ############################################
 
