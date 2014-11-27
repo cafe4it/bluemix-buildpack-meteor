@@ -14,7 +14,6 @@ unset GIT_DIR
 BUILD_DIR=$1
 CACHE_DIR=$2
 LP_DIR=`cd $(dirname $0); cd ..; pwd`
-BUILDPACK_DIR="$(dirname $(dirname $0))"
 
 [ ! -d $BUILD_DIR ] && mkdir $BUILD_DIR
 [ ! -d $CACHE_DIR ] && mkdir $CACHE_DIR
@@ -37,6 +36,18 @@ function indent() {
     Darwin) sed -l "$c";;
     *)      sed -u "$c";;
   esac
+}
+
+function server_npm_install() {
+  appdir="$1"
+
+  cd "$appdir"/programs/server
+  HOME="$appdir"/programs/server $VENDORED_NODE/bin/node $VENDORED_NODE/bin/npm install 2>&1 | indent
+
+  if [ "${PIPESTATUS[*]}" != "0 0" ]; then
+    echo " !     Failed to $command dependencies with npm"
+    exit 1
+  fi
 }
 
 function run_npm() {
@@ -102,12 +113,14 @@ export CPATH="$INCLUDE_PATH"
 export CPPPATH="$INCLUDE_PATH"
 
 ############################################
-# install meteorite
+# install jsontool 
 ############################################
-echo "-----> Installing meteorite with npm"
+echo "-----> Installing jsontool with npm"
 
-run_npm "install meteorite fibers -g"
-echo "Meteorite installed" | indent
+run_npm "install jsontool -g"
+echo "jsontool installed" | indent
+
+
 
 METEOR_BUILD_DIR="$BUILD_DIR/.meteor/heroku_build"
 mkdir -p "$HOME"
@@ -123,30 +136,45 @@ VENDORED_METEOR="$(mktmpdir meteor)"
 curl https://install.meteor.com | HOME="$VENDORED_METEOR" /bin/sh | indent
 echo "Meteor installed" | indent
 
-echo "Installing packages" | indent
-HOME="$BUILD_DIR" mrt install --force | indent
+"$VENDORED_METEOR"/.meteor/meteor --version | indent
+
+# build creates a directory with (one or more) bundles in it
 echo "Building meteor bundle" | indent
-HOME="$VENDORED_METEOR" "$VENDORED_METEOR"/.meteor/meteor bundle "$CACHE_DIR"/bundle.tar.gz 2>&1 | indent
+HOME="$VENDORED_METEOR" "$VENDORED_METEOR"/.meteor/meteor build "$CACHE_DIR" 2>&1 | indent
+
 
 mkdir -p "$METEOR_BUILD_DIR"/app
-tar -zxf "$CACHE_DIR"/bundle.tar.gz --strip-components 1 -C "$METEOR_BUILD_DIR"/app
-rm "$CACHE_DIR"/bundle.tar.gz
+
+BUNDLENAME="`basename $BUILD_DIR`.tar.gz"
+
+echo "Bundle name is $BUNDLENAME" | indent
+
+tar -zxf "$CACHE_DIR"/"$BUNDLENAME" --strip-components 1 -C "$METEOR_BUILD_DIR"/app
+rm "$CACHE_DIR"/"$BUNDLENAME"
+
+
+echo "Installing server-side dependencies" | indent
+
+server_npm_install "$METEOR_BUILD_DIR"/app
+
 ############################################
+
+############################################
+# Prepare ENV vars
+############################################
+echo "Setting up MONGO_URL in .profile.d"
+mkdir -p "$BUILD_DIR"/.profile.d
+cat > "$BUILD_DIR"/.profile.d/mongo.sh <<EOF
+  #!/bin/sh
+  export MONGO_URL=\`echo \$VCAP_SERVICES | sed 's/^.*url\\":\\"//' | sed 's/\\".*\$//'\`;
+  URLS=\`echo \$VCAP_APPLICATION | sed 's/^.*application_uris\\":\[\\"//' | sed 's/\\".*\$//'\`;
+  HD="http://";
+  export ROOT_URL="\$HD\$URLS/";
+  
+EOF
 
 # vendor node into the slug
 PATH="$METEOR_BUILD_DIR/bin:$PATH"
 echo "-----> Vendoring node into slug"
 mkdir -p "$METEOR_BUILD_DIR/bin"
 cp "$VENDORED_NODE/bin/node" "$METEOR_BUILD_DIR/bin/node"
-
-echo "-----> Move to app directory: /programs/server"
-cd "$METEOR_BUILD_DIR"/app/programs/server
-
-echo "-----> Run npm install"
-npm install
-
-# copy over environment
-echo "-----> Copy over environment profile.d scripts"
-mkdir -p $BUILD_DIR/.profile.d
-cp "$BUILDPACK_DIR/mongo.sh" $BUILD_DIR/.profile.d/mongo.sh
-cp "$BUILDPACK_DIR/mailgun.sh" $BUILD_DIR/.profile.d/mailgun.sh
