@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bin/compile <build-dir> <cache-dir>
 
-# fail fast
+# fail fast
 set -e
 
 # debug
@@ -38,6 +38,18 @@ function indent() {
   esac
 }
 
+function server_npm_install() {
+  appdir="$1"
+
+  cd "$appdir"/programs/server
+  HOME="$appdir"/programs/server $VENDORED_NODE/bin/node $VENDORED_NODE/bin/npm install 2>&1 | indent
+
+  if [ "${PIPESTATUS[*]}" != "0 0" ]; then
+    echo " !     Failed to $command dependencies with npm"
+    exit 1
+  fi
+}
+
 function run_npm() {
   command="$1"
 
@@ -56,8 +68,7 @@ function package_download() {
   location="$3"
 
   mkdir -p $location
-
-  package="http://nodejs.org/dist/v$version/$engine-v$version-linux-x64.tar.gz"
+  package="http://s3pository.heroku.com/$engine/v$version/$engine-v$version-linux-x64.tar.gz"
   echo " - downloading and extracting $engine from $package" | indent
   curl $package -s -o - | tar -zxf  - -C $location --strip 1
 }
@@ -77,7 +88,7 @@ if [ -f "${BUILD_DIR}/nodeversion" ]; then
 fi
 # add a warning if no version of node specified
 if [ "$requested_node_ver" == "" ]; then
-  requested_node_ver="0.10.30"
+  requested_node_ver="0.10.33"
   echo
   echo "No version of Node.js specified in nodeversion, using '${requested_node_ver}'" | indent
   echo
@@ -101,12 +112,21 @@ export npm_config_prefix="$VENDORED_MODULES"
 export CPATH="$INCLUDE_PATH"
 export CPPPATH="$INCLUDE_PATH"
 
+############################################
+# install jsontool 
+############################################
+echo "-----> Installing jsontool with npm"
 
-METEOR_BUILD_DIR="$BUILD_DIR/.meteor/meteor_build"
+run_npm "install jsontool -g"
+echo "jsontool installed" | indent
+
+
+
+METEOR_BUILD_DIR="$BUILD_DIR/.meteor/heroku_build"
 mkdir -p "$HOME"
 ############################################
-# install meteor + packages
-# and install into app/
+# install meteor + packages through mrt
+# bundle, and install into app/
 ############################################
 cd $BUILD_DIR
 echo "Installing meteor" | indent
@@ -116,12 +136,26 @@ VENDORED_METEOR="$(mktmpdir meteor)"
 curl https://install.meteor.com | HOME="$VENDORED_METEOR" /bin/sh | indent
 echo "Meteor installed" | indent
 
-echo "Building meteor bundle" | indent
-mkdir -p "$METEOR_BUILD_DIR"/app
-HOME="$VENDORED_METEOR" "$VENDORED_METEOR"/.meteor/meteor build "$METEOR_BUILD_DIR"/app --directory 2>&1 | indent
+"$VENDORED_METEOR"/.meteor/meteor --version | indent
 
-echo "Installing meteor bundle" | indent
-(cd "$METEOR_BUILD_DIR"/app/bundle/programs/server && HOME="$BUILD_DIR" $VENDORED_NODE/bin/node $VENDORED_NODE/bin/npm install 2>&1 | indent)
+# build creates a directory with (one or more) bundles in it
+echo "Building meteor bundle" | indent
+HOME="$VENDORED_METEOR" "$VENDORED_METEOR"/.meteor/meteor build "$CACHE_DIR" 2>&1 | indent
+
+
+mkdir -p "$METEOR_BUILD_DIR"/app
+
+BUNDLENAME="`basename $BUILD_DIR`.tar.gz"
+
+echo "Bundle name is $BUNDLENAME" | indent
+
+tar -zxf "$CACHE_DIR"/"$BUNDLENAME" --strip-components 1 -C "$METEOR_BUILD_DIR"/app
+rm "$CACHE_DIR"/"$BUNDLENAME"
+
+
+echo "Installing server-side dependencies" | indent
+
+server_npm_install "$METEOR_BUILD_DIR"/app
 
 ############################################
 
@@ -129,17 +163,14 @@ echo "Installing meteor bundle" | indent
 # Prepare ENV vars
 ############################################
 echo "Setting up MONGO_URL in .profile.d"
-
-echo 'Looking for a service tagged "nosql" in the following $VCAP_SERVICES...'
-echo $VCAP_SERVICES
-
 mkdir -p "$BUILD_DIR"/.profile.d
-cat | tee "$BUILD_DIR"/.profile.d/mongo.sh <<EOF
+cat > "$BUILD_DIR"/.profile.d/mongo.sh <<EOF
   #!/bin/sh
-
-  export ROOT_URL=\${ROOT_URL:-`ruby -e 'require "json"; puts "http://#{JSON.parse(ENV["VCAP_APPLICATION"])["application_uris"][0]}"'`}
-  export MONGO_URL=\${MONGO_URL:-`ruby -e "require 'json'; puts JSON.parse(ENV['VCAP_SERVICES']).find { |key,value| value[0]['tags'].include? 'nosql' }[1][0]['credentials']['url']"`}
-  export
+  export MONGO_URL=\`echo \$VCAP_SERVICES | sed 's/^.*url\\":\\"//' | sed 's/\\".*\$//'\`;
+  URLS=\`echo \$VCAP_APPLICATION | sed 's/^.*application_uris\\":\[\\"//' | sed 's/\\".*\$//'\`;
+  HD="http://";
+  export ROOT_URL="\$HD\$URLS/";
+  
 EOF
 
 # vendor node into the slug
